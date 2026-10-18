@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Rota Sanitária</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<style>
+:root{--bg:#f4f6f8;--c:#fff;--t:#1b2530;--m:#66727f;--p:#0a7d5a;--b:#d9dee3;--w:#c0392b;--o:#d68910}
+@media(prefers-color-scheme:dark){:root{--bg:#12171c;--c:#1d252d;--t:#e8edf1;--m:#93a0ac;--b:#33404c}}
+*{box-sizing:border-box}body{margin:0;font:16px system-ui,sans-serif;background:var(--bg);color:var(--t);padding:12px;max-width:640px;margin:auto}
+h1{font-size:20px;margin:4px 0 12px}.card{background:var(--c);border:1px solid var(--b);border-radius:12px;padding:12px;margin-bottom:12px}
+label{display:block;font-size:13px;color:var(--m);margin:10px 0 3px}input,select{width:100%;padding:11px;font-size:16px;border:1px solid var(--b);border-radius:8px;background:var(--bg);color:var(--t)}
+.row{display:flex;gap:8px}.row>div{flex:1}
+button{border:0;border-radius:10px;padding:13px;font-size:16px;font-weight:600;background:var(--p);color:#fff;width:100%;margin-top:10px}
+button.s{background:var(--b);color:var(--t)}button.x{width:auto;padding:6px 10px;margin:0;background:none;color:var(--w)}
+.sg{list-style:none;margin:2px 0 0;padding:0;border:1px solid var(--b);border-radius:8px;background:var(--c);max-height:190px;overflow:auto}
+.sg:empty{display:none}.sg li{padding:10px;font-size:14px;border-bottom:1px solid var(--b)}
+.pt{display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--b);font-size:14px}.pt div{flex:1}
+small{color:var(--m)}#map{height:320px;border-radius:12px;border:1px solid var(--b);margin-bottom:12px}
+.st{display:flex;gap:10px;padding:9px 0;border-bottom:1px solid var(--b);font-size:14px}
+.n{min-width:26px;height:26px;border-radius:50%;background:var(--p);color:#fff;text-align:center;line-height:26px;font-weight:700;font-size:13px}
+.n.d{background:#2459b8}.ok{color:var(--p)}.risk{color:var(--o)}.bad{color:var(--w)}
+.nm{background:var(--p);color:#fff;border-radius:50%;text-align:center;font:700 12px/24px sans-serif;border:2px solid #fff}
+a.nav{display:block;text-align:center;text-decoration:none;border-radius:10px;padding:14px;background:#2459b8;color:#fff;font-weight:600;margin-top:8px}
+footer{text-align:center;margin:8px 0 16px;font-size:12px}footer a{color:var(--m)}
+</style></head><body>
+<h1>🚐 Rota Sanitária</h1>
+
+<div class="card"><label>Base (saída)</label><input id="base"><small id="bs"></small></div>
+
+<div class="card">
+<label>Paciente</label><input id="nome" placeholder="Nome">
+<label>Tipo</label><select id="tipo"><option value="ida">Ida: casa → hospital</option><option value="volta">Retorno: hospital → casa</option></select>
+<label>Endereço do paciente</label><input id="home" placeholder="Rua, número, bairro…" autocomplete="off"><small id="hh" class="risk" style="display:block"></small>
+<label>Hospital / clínica</label><input id="hosp" placeholder="Ex.: hospital Angelina Caron" autocomplete="off">
+<div class="row" id="tm"><div><label>Horário da consulta</label><input id="hora" type="time"></div><div><label>Chegar antes (min)</label><select id="adv"><option>15</option><option selected>30</option><option>45</option><option>60</option></select></div></div>
+<button id="add">+ Adicionar à lista</button>
+</div>
+
+<details class="card"><summary><b>Hospitais fixos</b> <small>(lista compartilhada)</small></summary>
+<div id="hl"></div><small>Para incluir ou alterar, edite o arquivo hospitais.json no GitHub. Se quiser evitar a busca de coordenadas, inclua também "lat" e "lon" de cada hospital.</small></details>
+
+<div class="card"><b>Lista do dia</b> <small id="cnt"></small><div id="list"></div>
+<button id="go">Roteirizar</button><button class="s" id="clr">Limpar lista</button></div>
+
+<div id="map" hidden></div><div id="out"></div>
+<footer><a href="https://www.geoapify.com/" target="_blank" rel="noopener">Powered by Geoapify</a> · © colaboradores do <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a></footer>
+
+<script>
+/* ================= CONFIGURAÇÃO ================= */
+// Chave gratuita da Geoapify (geoapify.com → MyProjects), sem cartão de crédito. Só é usada na busca de endereços.
+const GEO_KEY='AIzaSyCU6MRZ8_9gYETUpYz-uPMeB3PUxfe7_1c';
+// Retângulo do estado do Paraná (oeste, sul, leste, norte)
+const PR={w:-54.62,s:-26.72,e:-48.02,n:-22.5};
+const BASE_TXT="R. Frei Nicodemus Grundhoff, 317 - Jardim Esmeralda, Piraquara - PR, 83301-320",SV=180,FATOR=1.15;
+/* ================================================= */
+
+const $=s=>document.querySelector(s);
+let S={};try{S=JSON.parse(localStorage.getItem('rs')||'{}')||{}}catch(e){}
+if(S.v!=5){S.base=null;S.recent=[];S.v=5}
+S.pts=S.pts||[];S.recent=S.recent||[];
+const save=()=>{try{localStorage.setItem('rs',JSON.stringify(S))}catch(e){}};
+const cur={};
+const norm=s=>s.normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+const k5=p=>p.lat.toFixed(5)+','+p.lon.toFixed(5);
+const cc=p=>p.lon+','+p.lat;
+
+/* ---------- Busca de endereços (Geoapify) ---------- */
+let avisou=false;
+function chave(){
+  if(GEO_KEY&&!GEO_KEY.startsWith('COLE'))return true;
+  if(!avisou){avisou=true;alert('Falta colocar a chave da Geoapify no arquivo (constante GEO_KEY).')}
+  return false;
+}
+const mapR=r=>{const f=(r.formatted||'').replace(/,\s*(Brasil|Brazil)$/,'');
+  return{label:f,nav:f,lat:r.lat,lon:r.lon,semNum:r.result_type=='street'}};
+async function gjson(path,params){
+  const u=new URL('https://api.geoapify.com/v1/geocode/'+path);
+  Object.entries({...params,lang:'pt',format:'json',apiKey:GEO_KEY}).forEach(([k,v])=>u.searchParams.set(k,v));
+  const r=await fetch(u);if(!r.ok)throw new Error('Geoapify '+r.status);
+  return (await r.json()).results||[];
+}
+const RECT=`rect:${PR.w},${PR.s},${PR.e},${PR.n}`;
+const acCache={};
+async function geo(q){
+  if(!chave())return [];
+  const k=norm(q);if(acCache[k])return acCache[k];
+  const b=S.base||{lat:-25.43,lon:-49.27};
+  // filter = só dentro do Paraná; bias = prioriza resultados perto da base
+  const res=await gjson('autocomplete',{text:q,filter:RECT,bias:`proximity:${b.lon},${b.lat}`,limit:5});
+  return acCache[k]=res.filter(r=>(!r.state_code||r.state_code=='PR')&&r.lat!=null).map(mapR);
+}
+async function geoAddr(addr){ // usado só p/ base e hospitais fixos; fica em cache
+  if(!chave())return null;
+  try{const r=await gjson('search',{text:addr,filter:RECT,limit:1});return r[0]?mapR(r[0]):null}catch(e){return null}
+}
+
+const DEF=[{name:'Hospital Erasto Gaertner',addr:'R. Dr. Ovande do Amaral, 201 - Jardim das Américas, Curitiba - PR, 81520-060'}];
+S.hosp=(S.hospLast||DEF).map(h=>({...h}));S.hosp.forEach(h=>{const g=(S.gc||{})[h.addr];if(!h.lat&&g)Object.assign(h,g)});
+const fixedList=q=>{const ws=norm(q).split(/\s+/).filter(Boolean);return S.hosp.filter(h=>h.lat&&ws.every(w=>norm(h.name).includes(w))).map(h=>({label:`${h.name} — ${h.addr}`,nav:`${h.name}, ${h.addr}`,lat:h.lat,lon:h.lon,fixed:true}))};
+
+function ac(inp,pick,extra){
+  const ul=document.createElement('ul');ul.className='sg';inp.after(ul);let t;
+  const show=a=>{ul.innerHTML='';a.forEach(p=>{const li=document.createElement('li');li.textContent=(p.fixed?'⭐ ':'')+p.label;li.onclick=()=>{inp.value=p.label;ul.innerHTML='';pick(p)};ul.append(li)})};
+  if(extra)inp.addEventListener('focus',()=>{if(!inp.value)show(extra(''))});
+  inp.addEventListener('input',()=>{
+    pick(null);clearTimeout(t);const q=inp.value.trim();
+    if(q.length<3){show(q&&extra?extra(q):[]);return}
+    // 1º locais (hospitais fixos e endereços já usados: não gastam requisição)
+    const fx=extra?extra(q):[];
+    const rec=S.recent.filter(r=>!r.fixed&&norm(r.label).includes(norm(q))).slice(0,3);
+    const pre=[...fx,...rec];show(pre);
+    // 2º Geoapify: 4+ letras, depois de 0,6 s sem digitar e se faltarem sugestões locais
+    if(q.length<4||pre.length>=3)return;
+    t=setTimeout(async()=>{try{const r=await geo(q);if(inp.value.trim()!=q)return;show([...pre,...r.filter(x=>!pre.some(y=>y.label==x.label))])}catch(e){console.error(e)}},600);
+  });
+}
+ac($('#home'),p=>{cur.home=p;$('#hh').textContent=p&&p.semNum?'⚠ Endereço sem número: digite o número da casa para maior precisão':''});
+ac($('#hosp'),p=>cur.hosp=p,fixedList);
+ac($('#base'),p=>{if(p){S.base=p;save();$('#bs').textContent='✔ base definida'}});
+$('#tipo').onchange=()=>$('#tm').style.display=$('#tipo').value=='ida'?'':'none';
+
+(async()=>{
+  $('#base').value=S.base?S.base.label:BASE_TXT;
+  if(!S.base){
+    if(!chave()){$('#bs').textContent='Configure a chave da Geoapify para localizar a base';return}
+    const r=await geoAddr(BASE_TXT);
+    if(r){S.base=r;save();$('#base').value=r.label;$('#bs').textContent='✔ base localizada'}
+    else $('#bs').textContent='Base não encontrada: digite e escolha uma sugestão';
+  }else $('#bs').textContent='✔ base definida';
+})();
+
+function render(){
+  $('#cnt').textContent=S.pts.length?`(${S.pts.length})`:'';
+  $('#list').innerHTML=S.pts.map((p,i)=>`<div class="pt"><div><b>${p.nome}</b> <small>${p.tipo=='ida'?'Ida · consulta '+p.hora:'Retorno'}</small><br><small>${short(p.home.label)} ⇄ ${short(p.hosp.label)}</small></div><button class="x" onclick="del(${i})">✕</button></div>`).join('')||'<small><br>Nenhum paciente ainda.</small>';
+}
+const short=s=>s.split(',').slice(0,2).join(',');
+window.del=i=>{S.pts.splice(i,1);save();render()};
+$('#clr').onclick=()=>{if(confirm('Limpar a lista?')){S.pts=[];save();render();$('#out').innerHTML='';$('#map').hidden=true}};
+$('#add').onclick=()=>{
+  const nome=$('#nome').value.trim(),tipo=$('#tipo').value,hora=$('#hora').value;
+  if(!nome)return alert('Informe o nome');
+  if(!cur.home||!cur.hosp)return alert('Escolha o endereço e o hospital nas sugestões que aparecem ao digitar');
+  if(tipo=='ida'&&!hora)return alert('Informe o horário da consulta');
+  S.pts.push({nome,tipo,hora:tipo=='ida'?hora:'',adv:+$('#adv').value,home:cur.home,hosp:cur.hosp});
+  [cur.home,cur.hosp].forEach(p=>{if(!S.recent.some(r=>r.label==p.label))S.recent.unshift(p)});S.recent=S.recent.slice(0,40);
+  save();render();['nome','home','hosp'].forEach(k=>$('#'+k).value='');cur.home=cur.hosp=null;$('#hh').textContent='';
+};
+render();$('#tipo').onchange();
+
+function renderH(){$('#hl').innerHTML=S.hosp.length?S.hosp.map(h=>`<div class="pt"><div><b>${h.name}</b><br><small>${h.addr}${h.lat?'':' · localizando…'}</small></div></div>`).join(''):'<small>Nenhum hospital fixo.</small>'}
+async function loadHosp(){
+  try{const r=await fetch('hospitais.json?'+Date.now());const l=await r.json();if(Array.isArray(l)){S.hospLast=l;S.hosp=l.map(h=>({...h}));save()}}catch(e){}
+  S.hosp.forEach(h=>{const g=(S.gc||{})[h.addr];if(!h.lat&&g)Object.assign(h,g)});renderH();
+  for(const h of S.hosp){if(h.lat)continue;const g=await geoAddr(h.addr);if(g){h.lat=g.lat;h.lon=g.lon;S.gc=S.gc||{};S.gc[h.addr]={lat:g.lat,lon:g.lon};save();renderH()}}
+}
+setTimeout(loadHosp,300);
+
+const hm=s=>{s=Math.round(s/60);s=((s%1440)+1440)%1440;return String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')};
+const mins=h=>{const[a,b]=h.split(':');return +a*60+ +b};
+
+$('#go').onclick=async()=>{
+  if(!S.base)return alert('Base ainda não localizada');
+  if(!S.pts.length)return alert('Adicione pacientes');
+  $('#go').textContent='Calculando…';
+  try{await plan()}catch(e){console.error(e);alert('Erro ao calcular: '+String(e.message||e).slice(0,200))}
+  $('#go').textContent='Roteirizar';
+};
+
+/* ---------- Tempos e traçado (OSRM, servidor público gratuito, sem chave) ---------- */
+// Pontos repetidos (mesmo hospital etc.) entram só uma vez na tabela.
+async function matriz(U){
+  if(U.length>100)throw new Error('Pontos demais para o servidor gratuito (máx. 100)');
+  const r=await fetch('https://router.project-osrm.org/table/v1/driving/'+U.map(cc).join(';')+'?annotations=duration');
+  const j=await r.json();
+  if(j.code!='Ok')throw new Error('Servidor de rotas indisponível ('+(j.code||r.status)+'). Tente de novo em instantes.');
+  if(j.durations.some(l=>l.some(x=>x==null)))throw new Error('Não há rota entre dois dos endereços');
+  return j.durations;
+}
+async function rotaOSRM(P){
+  const r=await fetch('https://router.project-osrm.org/route/v1/driving/'+P.map(cc).join(';')+'?overview=full&geometries=geojson');
+  const j=await r.json();
+  return j.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]);
+}
+
+async function plan(){
+  // nós: pickup e entrega de cada paciente
+  const N=[];
+  S.pts.forEach((p,i)=>{
+    const ida=p.tipo=='ida';
+    N.push({i,k:'pick',pt:ida?p.home:p.hosp});
+    N.push({i,k:'drop',pt:ida?p.hosp:p.home,dl:ida?(mins(p.hora)-p.adv)*60:null});
+  });
+  const P=[S.base,...N.map(n=>n.pt)];
+  const U=[],ui={};
+  const ix=p=>{const k=k5(p);if(ui[k]==null){ui[k]=U.length;U.push(p)}return ui[k]};
+  const pi=P.map(ix);
+  const DU=await matriz(U);
+  const D=pi.map(a=>pi.map(b=>DU[a][b]*FATOR));
+  const m=N.length;
+  const valid=seq=>{const pos={};seq.forEach((n,k)=>pos[n]=k);
+    for(const n of seq){if(N[n].k=='drop'){if(pos[n-1]>pos[n])return false}}
+    return true};
+  const sim=seq=>{let t=0,prev=0;const off=[];
+    for(const n of seq){t+=D[prev][n+1];off[n]=t;t+=SV;prev=n+1}
+    let dep=null,ride=0;
+    seq.forEach(n=>{if(N[n].dl!=null){const s=N[n].dl-off[n];dep=dep==null?s:Math.min(dep,s)}if(N[n].k=='drop')ride+=off[n]-off[n-1]});
+    return{off,end:t,dep,ride,cost:t+0.5*ride}};
+  // sequência inicial: por horário-limite, pick logo antes do drop
+  let order=[...Array(S.pts.length).keys()].sort((a,b)=>(N[2*a+1].dl??1e9)-(N[2*b+1].dl??1e9));
+  let best=order.flatMap(i=>[2*i,2*i+1]),bc=valid(best)?sim(best).cost:1e12;
+  for(let it=0;it<8000;it++){
+    const s=[...best],a=Math.floor(Math.random()*m),x=s.splice(a,1)[0];
+    s.splice(Math.floor(Math.random()*m),0,x);
+    if(!valid(s))continue;const c=sim(s).cost;if(c<=bc){best=s;bc=c}
+  }
+  const R=sim(best);
+  const now=new Date(),nowS=(now.getHours()*60+now.getMinutes())*60;
+  let dep=R.dep!=null?R.dep:nowS;
+  const late=R.dep!=null&&dep<nowS;
+  // paradas
+  const stops=best.map(n=>{const nd=N[n],p=S.pts[nd.i],arr=dep+R.off[n];
+    let st='',cls='';
+    if(nd.dl!=null){const marg=(mins(p.hora)*60-arr)/60;st=`consulta ${p.hora} · folga ${Math.round(marg)} min`;cls=marg>=p.adv-1?'ok':marg>=0?'risk':'bad'}
+    return{nd,p,arr,st,cls,pt:nd.pt}});
+  // pontos do trajeto (sem repetir paradas consecutivas no mesmo local)
+  const path=[S.base];stops.forEach(s=>{if(k5(path[path.length-1])!=k5(s.pt))path.push(s.pt)});
+  let poly=path.map(p=>[p.lat,p.lon]);
+  if(path.length>1){try{poly=await rotaOSRM(path)}catch(e){console.error(e)}} // se falhar, linhas retas
+  const coords=[S.base,...stops.map(s=>s.pt)];
+  drawMap(coords,poly);
+  // saída
+  let h=`<div class="card"><b>Saia da base às ${hm(dep)}</b><br><small>Duração estimada: ${Math.round(R.end/60)} min (com +15% de margem de trânsito e ${SV/60} min por parada)</small>`;
+  if(late)h+=`<div class="bad">⚠ Para cumprir os horários, era preciso sair antes do horário atual.</div>`;
+  h+=stops.map((s,k)=>`<div class="st"><span class="n ${s.nd.k=='drop'?'d':''}">${k+1}</span><div><b>${s.nd.k=='pick'?'Buscar':'Deixar'} ${s.p.nome}</b> <small>${hm(s.arr)}</small><br><small>${short(s.pt.label)}</small>${s.st?`<br><span class="${s.cls}">${s.st}</span>`:''}</div></div>`).join('');
+  // links Google Maps: paradas pelo endereço em texto, dividido a cada 10 paradas
+  const f=p=>(p.nav||p.label.replace(/ — /,', '))+', Brasil';
+  const nav=path.slice(1);
+  let origin=f(S.base);
+  for(let i=0,leg=1;i<nav.length;i+=10,leg++){
+    const ch=nav.slice(i,i+10),dest=f(ch[ch.length-1]),w=ch.slice(0,-1).map(f).join('|');
+    h+=`<a class="nav" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(origin)}&destination=${encodeURIComponent(dest)}${w?'&waypoints='+encodeURIComponent(w):''}&travelmode=driving">🧭 Navegar no Google Maps${nav.length>10?' (trecho '+leg+')':''}</a>`;
+    origin=dest;
+  }
+  $('#out').innerHTML=h+'</div>';
+  $('#out').scrollIntoView({behavior:'smooth'});
+}
+
+let map,layer;
+function drawMap(coords,poly){
+  $('#map').hidden=false;
+  if(!map){map=L.map('map');L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'© OpenStreetMap'}).addTo(map)}
+  if(layer)layer.remove();layer=L.layerGroup().addTo(map);
+  const line=L.polyline(poly,{color:'#2459b8',weight:5}).addTo(layer);
+  coords.forEach((p,k)=>L.marker([p.lat,p.lon],{icon:L.divIcon({className:'',html:`<div class="nm" style="${k?'':'background:#222'}">${k?k:'B'}</div>`,iconSize:[24,24]})}).addTo(layer));
+  map.fitBounds(line.getBounds(),{padding:[20,20]});setTimeout(()=>map.invalidateSize(),100);
+}
+</script></body></html>

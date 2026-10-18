@@ -1,0 +1,26 @@
+[
+  {
+    "name": "Hospital Erasto Gaertner",
+    "addr": "R. Dr. Ovande do Amaral, 201 - Jardim das Américas, Curitiba - PR, 81520-060"
+  },
+  {
+    "name": "Hospital Erastinho",
+    "addr": "R. Dr. Ovande do Amaral, 201 - Jardim das Américas, Curitiba - PR, 81520-060"
+  },
+   {
+    "name": "Amb Evang/Candido Hartmann 510",
+    "addr": "Av. Cândido Hartmann, 510 - Mercês, Curitiba - PR, 80710-570"
+  },
+   {
+    "name": "COMESP SJP",
+    "addr": "Av. Rui Barbosa, 10421 - Aristocrata, São José dos Pinhais - PR, 83025-094"
+  },
+   {
+    "name": "Hospital Angelina Caron/Pracinha",
+    "addr": "R. Antônio Bero, 102 - Recanto Verde, Campina Grande do Sul - PR, 83430-000"
+  },
+   {
+    "name": "APR Cabral",
+    "addr": "R. dos Funcionários, 805 - Cabral, Curitiba - PR, 80035-050"
+  }
+]
