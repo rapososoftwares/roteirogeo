@@ -49,10 +49,10 @@ footer{text-align:center;margin:8px 0 16px;font-size:12px}footer a{color:var(--m
 <script>
 /* ================= CONFIGURAÇÃO ================= */
 // Chave gratuita da Geoapify (geoapify.com → MyProjects), sem cartão de crédito. Só é usada na busca de endereços.
-const GEO_KEY='d38fddfebc2044c6806d84bcfced29e0';
+const GEO_KEY='COLE_SUA_CHAVE_GEOAPIFY';
 // Retângulo do estado do Paraná (oeste, sul, leste, norte)
 const PR={w:-54.62,s:-26.72,e:-48.02,n:-22.5};
-const BASE_TXT="R. Frei Nicodemus Grundhoff, 317 - Jardim Esmeralda, Piraquara - PR, 83301-320",SV=180,FATOR=1.15;
+const BASE_TXT="Rua Frei Nicodemus Grundhoff, 317, Jardim Esmeralda, Piraquara, PR",SV=180,FATOR=1.15;
 /* ================================================= */
 
 const $=s=>document.querySelector(s);
@@ -197,31 +197,65 @@ async function plan(){
   const pi=P.map(ix);
   const DU=await matriz(U);
   const D=pi.map(a=>pi.map(b=>DU[a][b]*FATOR));
-  const m=N.length;
+  const m=N.length,np=S.pts.length;
+  const now=new Date();let nowS=(now.getHours()*60+now.getMinutes())*60;
+  // se todas as consultas de hoje já passaram, considera que é uma rota para outro dia
+  const cs=S.pts.filter(p=>p.tipo=='ida').map(p=>mins(p.hora)*60);
+  const outroDia=cs.length>0&&cs.every(c=>c<nowS);
+  if(outroDia)nowS=0;
   const valid=seq=>{const pos={};seq.forEach((n,k)=>pos[n]=k);
     for(const n of seq){if(N[n].k=='drop'){if(pos[n-1]>pos[n])return false}}
     return true};
+  // simulação: paradas no mesmo local seguidas contam um único tempo de parada
   const sim=seq=>{let t=0,prev=0;const off=[];
-    for(const n of seq){t+=D[prev][n+1];off[n]=t;t+=SV;prev=n+1}
-    let dep=null,ride=0;
-    seq.forEach(n=>{if(N[n].dl!=null){const s=N[n].dl-off[n];dep=dep==null?s:Math.min(dep,s)}if(N[n].k=='drop')ride+=off[n]-off[n-1]});
-    return{off,end:t,dep,ride,cost:t+0.5*ride}};
-  // sequência inicial: por horário-limite, pick logo antes do drop
-  let order=[...Array(S.pts.length).keys()].sort((a,b)=>(N[2*a+1].dl??1e9)-(N[2*b+1].dl??1e9));
-  let best=order.flatMap(i=>[2*i,2*i+1]),bc=valid(best)?sim(best).cost:1e12;
-  for(let it=0;it<8000;it++){
-    const s=[...best],a=Math.floor(Math.random()*m),x=s.splice(a,1)[0];
-    s.splice(Math.floor(Math.random()*m),0,x);
-    if(!valid(s))continue;const c=sim(s).cost;if(c<=bc){best=s;bc=c}
+    for(const n of seq){const idx=n+1;if(prev>0&&pi[prev]!=pi[idx])t+=SV;t+=D[prev][idx];off[n]=t;prev=idx}
+    t+=SV;
+    let dep0=null,ride=0;
+    seq.forEach(n=>{if(N[n].dl!=null){const x=N[n].dl-off[n];dep0=dep0==null?x:Math.min(dep0,x)}if(N[n].k=='drop')ride+=off[n]-off[n-1]});
+    const depU=Math.max(dep0==null?nowS:dep0,nowS); // não dá para sair no passado
+    let late=0;seq.forEach(n=>{if(N[n].dl!=null)late+=Math.max(0,depU+off[n]-N[n].dl)});
+    return{off,end:t,dep0,depU,ride,late}};
+  const cost=(r,W)=>r.end+0.25*r.ride+W*r.late;
+  const rnd=k=>Math.floor(Math.random()*k);
+  const mv=cur=>{
+    const s=[...cur],r=Math.random();
+    if(r<.45){const x=s.splice(rnd(m),1)[0];s.splice(rnd(m),0,x)}            // move uma parada
+    else if(r<.8){const i=rnd(np);s.splice(s.indexOf(2*i),1);s.splice(s.indexOf(2*i+1),1); // move o paciente inteiro
+      const a=rnd(m-1);s.splice(a,0,2*i);const b=a+1+rnd(m-1-a);s.splice(b,0,2*i+1)}
+    else{const i=rnd(m),j=rnd(m);[s[i],s[j]]=[s[j],s[i]]}                    // troca duas paradas
+    return s};
+  function otimiza(W,starts){
+    let bestS=null,bestC=Infinity;
+    for(const st of starts){
+      if(!valid(st))continue;
+      let cu=[...st],cc=cost(sim(cu),W);
+      if(cc<bestC){bestC=cc;bestS=[...cu]}
+      const T0=Math.max(60,cc*0.03),IT=6000;
+      for(let it=0;it<IT;it++){
+        const T=T0*(1-it/IT)+1e-9,s=mv(cu);
+        if(!valid(s))continue;
+        const c=cost(sim(s),W);
+        if(c<=cc||Math.random()<Math.exp((cc-c)/T)){cu=s;cc=c;if(c<bestC){bestC=c;bestS=[...s]}}
+      }
+    }
+    return bestS;
   }
-  const R=sim(best);
-  const now=new Date(),nowS=(now.getHours()*60+now.getMinutes())*60;
-  let dep=R.dep!=null?R.dep:nowS;
-  const late=R.dep!=null&&dep<nowS;
+  // pontos de partida: (A) buscar e deixar um por um, por horário; (B) buscar todos (vizinho mais próximo) e levar todos
+  const nn=(ids,from)=>{const out=[],rest=[...ids];let prev=from;
+    while(rest.length){let bi=0,bd=Infinity;rest.forEach((n,k)=>{const d=D[prev][n+1];if(d<bd){bd=d;bi=k}});const n=rest.splice(bi,1)[0];out.push(n);prev=n+1}
+    return out};
+  const order=[...Array(np).keys()].sort((a,b)=>(N[2*a+1].dl??1e9)-(N[2*b+1].dl??1e9));
+  const A=order.flatMap(i=>[2*i,2*i+1]);
+  const pk=nn([...Array(np).keys()].map(i=>2*i),0);
+  const B=[...pk,...nn([...Array(np).keys()].map(i=>2*i+1),pk[pk.length-1]+1)];
+  // 1ª tentativa: cumprir todos os horários. Se for impossível, monta pelo menor tempo total, sem correr atrás do horário.
+  let best=otimiza(10,[A,B]),R=sim(best),modoLate=false;
+  if(R.late>0){modoLate=true;best=otimiza(0,[best,A,B]);R=sim(best)}
+  const dep=R.depU;
   // paradas
   const stops=best.map(n=>{const nd=N[n],p=S.pts[nd.i],arr=dep+R.off[n];
     let st='',cls='';
-    if(nd.dl!=null){const marg=(mins(p.hora)*60-arr)/60;st=`consulta ${p.hora} · folga ${Math.round(marg)} min`;cls=marg>=p.adv-1?'ok':marg>=0?'risk':'bad'}
+    if(nd.dl!=null){const marg=(mins(p.hora)*60-arr)/60;st=marg<0?`consulta ${p.hora} · atraso ${Math.round(-marg)} min`:`consulta ${p.hora} · folga ${Math.round(marg)} min`;cls=marg>=p.adv-1?'ok':marg>=0?'risk':'bad'}
     return{nd,p,arr,st,cls,pt:nd.pt}});
   // pontos do trajeto (sem repetir paradas consecutivas no mesmo local)
   const path=[S.base];stops.forEach(s=>{if(k5(path[path.length-1])!=k5(s.pt))path.push(s.pt)});
@@ -231,7 +265,8 @@ async function plan(){
   drawMap(coords,poly);
   // saída
   let h=`<div class="card"><b>Saia da base às ${hm(dep)}</b><br><small>Duração estimada: ${Math.round(R.end/60)} min (com +15% de margem de trânsito e ${SV/60} min por parada)</small>`;
-  if(late)h+=`<div class="bad">⚠ Para cumprir os horários, era preciso sair antes do horário atual.</div>`;
+  if(outroDia)h+=`<br><small>Todas as consultas de hoje já passaram: calculado como rota de outro dia.</small>`;
+  if(modoLate)h+=`<div class="bad">⚠ Não dá para chegar no horário de todos saindo agora. A rota foi montada pelo menor tempo total, sem forçar paradas só para correr atrás do horário.</div>`;
   h+=stops.map((s,k)=>`<div class="st"><span class="n ${s.nd.k=='drop'?'d':''}">${k+1}</span><div><b>${s.nd.k=='pick'?'Buscar':'Deixar'} ${s.p.nome}</b> <small>${hm(s.arr)}</small><br><small>${short(s.pt.label)}</small>${s.st?`<br><span class="${s.cls}">${s.st}</span>`:''}</div></div>`).join('');
   // links Google Maps: paradas pelo endereço em texto, dividido a cada 10 paradas
   const f=p=>(p.nav||p.label.replace(/ — /,', '))+', Brasil';
