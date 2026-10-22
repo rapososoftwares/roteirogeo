@@ -279,8 +279,16 @@ async function plan(){
   ];
   // 1ª tentativa: cumprir os horários. Se for impossível, todos continuam sendo buscados e a rota sai pelo menor tempo total
   // (com hospitais diferentes, ainda dá um peso leve às consultas mais cedo).
-  let best=otimiza(10,starts),R=sim(best),modoLate=false;
-  if(R.late>0){modoLate=true;best=otimiza(mesmoHosp?0:1,[best,...starts]);R=sim(best)}
+  let best,R,modoLate=false;
+  if(lote&&S.pts[0].tipo=='volta'){
+    // Retorno de um só hospital: entrega sempre do mais perto do hospital ao mais longe (varredura para fora, sem zigue-zague)
+    // e depois volta à base. A distância é o tempo de viagem do hospital até a casa de cada paciente.
+    const ord=[...Array(np).keys()].sort((a,b)=>D[2*a+1][2*a+2]-D[2*b+1][2*b+2]);
+    best=[...ord.map(i=>2*i),...ord.map(i=>2*i+1)];R=sim(best);
+  }else{
+    best=otimiza(10,starts);R=sim(best);
+    if(R.late>0){modoLate=true;best=otimiza(mesmoHosp?0:1,[best,...starts]);R=sim(best)}
+  }
   const dep=R.depU;
   // paradas
   const stops=best.map(n=>{const nd=N[n],p=S.pts[nd.i],arr=dep+R.off[n];
