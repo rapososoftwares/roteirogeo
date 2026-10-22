@@ -52,12 +52,16 @@ footer{text-align:center;margin:8px 0 16px;font-size:12px}footer a{color:var(--m
 const GEO_KEY='d38fddfebc2044c6806d84bcfced29e0';
 // Retângulo do estado do Paraná (oeste, sul, leste, norte)
 const PR={w:-54.62,s:-26.72,e:-48.02,n:-22.5};
+// Quanto cada km pesa na escolha da ordem e do caminho (em segundos de custo por km). Maior = prefere rotas mais curtas, mesmo mais lentas.
+const PESO_KM=60;
+// Caminho alternativo (ex.: por dentro da cidade) só é aceito se não passar de 40% mais lento que o mais rápido.
+const TOL_ALT=1.4;
 const BASE_TXT="Rua Frei Nicodemus Grundhoff, 317, Jardim Esmeralda, Piraquara, PR",SV=180,FATOR=1.15;
 /* ================================================= */
 
 const $=s=>document.querySelector(s);
 let S={};try{S=JSON.parse(localStorage.getItem('rs')||'{}')||{}}catch(e){}
-if(S.v!=5){S.base=null;S.recent=[];S.v=5}
+if(S.v!=6){S.base=null;S.recent=[];S.ga={};S.v=6}
 S.pts=S.pts||[];S.recent=S.recent||[];
 const save=()=>{try{localStorage.setItem('rs',JSON.stringify(S))}catch(e){}};
 const cur={};
@@ -72,8 +76,12 @@ function chave(){
   if(!avisou){avisou=true;alert('Falta colocar a chave da Geoapify no arquivo (constante GEO_KEY).')}
   return false;
 }
-const mapR=r=>{const f=(r.formatted||'').replace(/,\s*(Brasil|Brazil)$/,'');
-  return{label:f,nav:f,lat:r.lat,lon:r.lon,semNum:r.result_type=='street'}};
+const semPais=t=>(t||'').replace(/,\s*(Brasil|Brazil)$/,'');
+const mapR=r=>{const f=semPais(r.formatted);
+  // estabelecimento (hospital/clínica): guarda o ENDEREÇO sem o nome, para localizar pelo endereço e não pelo nome
+  const poi=r.result_type=='amenity'&&!!r.name&&!!r.address_line2;
+  const addr=poi?semPais(r.address_line2):f;
+  return{label:f,nav:addr,addr,poi,lat:r.lat,lon:r.lon,semNum:r.result_type=='street'}};
 async function gjson(path,params){
   const u=new URL('https://api.geoapify.com/v1/geocode/'+path);
   Object.entries({...params,lang:'pt',format:'json',apiKey:GEO_KEY}).forEach(([k,v])=>u.searchParams.set(k,v));
@@ -97,7 +105,7 @@ async function geoAddr(addr){ // usado só p/ base e hospitais fixos; fica em ca
 
 const DEF=[{name:'Hospital Erasto Gaertner',addr:'R. Dr. Ovande do Amaral, 201 - Jardim das Américas, Curitiba - PR, 81520-060'}];
 S.hosp=(S.hospLast||DEF).map(h=>({...h}));S.hosp.forEach(h=>{const g=(S.gc||{})[h.addr];if(!h.lat&&g)Object.assign(h,g)});
-const fixedList=q=>{const ws=norm(q).split(/\s+/).filter(Boolean);return S.hosp.filter(h=>h.lat&&ws.every(w=>norm(h.name).includes(w))).map(h=>({label:`${h.name} — ${h.addr}`,nav:`${h.name}, ${h.addr}`,lat:h.lat,lon:h.lon,fixed:true}))};
+const fixedList=q=>{const ws=norm(q).split(/\s+/).filter(Boolean);return S.hosp.filter(h=>h.lat&&ws.every(w=>norm(h.name).includes(w))).map(h=>({label:`${h.name} — ${h.addr}`,nav:h.addr,addr:h.addr,exato:true,lat:h.lat,lon:h.lon,fixed:true}))};
 
 function ac(inp,pick,extra){
   const ul=document.createElement('ul');ul.className='sg';inp.after(ul);let t;
@@ -171,19 +179,46 @@ $('#go').onclick=async()=>{
 // Pontos repetidos (mesmo hospital etc.) entram só uma vez na tabela.
 async function matriz(U){
   if(U.length>100)throw new Error('Pontos demais para o servidor gratuito (máx. 100)');
-  const r=await fetch('https://router.project-osrm.org/table/v1/driving/'+U.map(cc).join(';')+'?annotations=duration');
+  const r=await fetch('https://router.project-osrm.org/table/v1/driving/'+U.map(cc).join(';')+'?annotations=duration,distance');
   const j=await r.json();
   if(j.code!='Ok')throw new Error('Servidor de rotas indisponível ('+(j.code||r.status)+'). Tente de novo em instantes.');
   if(j.durations.some(l=>l.some(x=>x==null)))throw new Error('Não há rota entre dois dos endereços');
-  return j.durations;
+  return{dur:j.durations,dist:j.distances||j.durations.map(l=>l.map(()=>0))};
 }
-async function rotaOSRM(P){
-  const r=await fetch('https://router.project-osrm.org/route/v1/driving/'+P.map(cc).join(';')+'?overview=full&geometries=geojson');
-  const j=await r.json();
-  return j.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]);
+// Traçado trecho a trecho: entre duas paradas, escolhe entre o caminho mais rápido e a alternativa
+// (se houver) pelo menor custo = tempo + PESO_KM por km, desde que não seja mais de 40% mais lenta.
+// Também devolve o atraso acumulado (cum) causado por trechos alternativos mais lentos.
+async function rotaLegs(P){
+  const poly=[],cum=[0];
+  for(let i=0;i<P.length-1;i++){
+    const a=P[i],b=P[i+1];let esc=null,rap=null;
+    try{
+      const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${cc(a)};${cc(b)}?alternatives=true&overview=full&geometries=geojson`);
+      const rs=(await r.json()).routes||[];
+      if(rs.length){
+        rap=rs[0];
+        const custo=x=>x.duration*FATOR+PESO_KM*x.distance/1000;
+        esc=rs.filter(x=>x.duration<=rap.duration*TOL_ALT+60).sort((p,q)=>custo(p)-custo(q))[0]||rap;
+      }
+    }catch(e){console.error(e)}
+    if(esc)poly.push(...esc.geometry.coordinates.map(c=>[c[1],c[0]]));else poly.push([a.lat,a.lon],[b.lat,b.lon]);
+    cum.push(cum[i]+(esc?Math.max(0,(esc.duration-rap.duration)*FATOR):0));
+    if(i<P.length-2)await new Promise(r=>setTimeout(r,150)); // respeita o servidor gratuito
+  }
+  return{poly,cum};
+}
+// Coordenada do hospital pelo ENDEREÇO (não pelo nome do estabelecimento); fica em cache
+async function exato(pt){
+  if(!pt||!pt.poi||pt.exato||!pt.addr)return;
+  S.ga=S.ga||{};
+  let g=S.ga[pt.addr];
+  if(!g){const r=await geoAddr(pt.addr);if(r)g=S.ga[pt.addr]={lat:r.lat,lon:r.lon}}
+  if(g){pt.lat=g.lat;pt.lon=g.lon;pt.exato=true}
 }
 
 async function plan(){
+  for(const p of S.pts)await exato(p.hosp);
+  save();
   // nós: pickup e entrega de cada paciente
   const N=[];
   S.pts.forEach((p,i)=>{
@@ -195,8 +230,9 @@ async function plan(){
   const U=[],ui={};
   const ix=p=>{const k=k5(p);if(ui[k]==null){ui[k]=U.length;U.push(p)}return ui[k]};
   const pi=P.map(ix);
-  const DU=await matriz(U);
-  const D=pi.map(a=>pi.map(b=>DU[a][b]*FATOR));
+  const MX=await matriz(U);
+  const D=pi.map(a=>pi.map(b=>MX.dur[a][b]*FATOR));      // tempo (com margem)
+  const DK=pi.map(a=>pi.map(b=>MX.dist[a][b]));          // distância em metros
   const m=N.length,np=S.pts.length;
   const now=new Date();let nowS=(now.getHours()*60+now.getMinutes())*60;
   // se todas as consultas de hoje já passaram, considera que é uma rota para outro dia
@@ -214,15 +250,15 @@ async function plan(){
     if(lote){let viuDrop=false;for(const n of seq){if(N[n].k=='drop')viuDrop=true;else if(viuDrop)return false}}
     return true};
   // simulação: paradas seguidas no mesmo local contam um único tempo de parada; se volta, inclui o retorno à base
-  const sim=seq=>{let t=0,prev=0;const off=[];
-    for(const n of seq){const idx=n+1;if(prev>0&&pi[prev]!=pi[idx])t+=SV;t+=D[prev][idx];off[n]=t;prev=idx}
-    t+=SV;if(volta)t+=D[prev][0];
+  const sim=seq=>{let t=0,prev=0,km=0;const off=[];
+    for(const n of seq){const idx=n+1;if(prev>0&&pi[prev]!=pi[idx])t+=SV;t+=D[prev][idx];km+=DK[prev][idx];off[n]=t;prev=idx}
+    t+=SV;if(volta){t+=D[prev][0];km+=DK[prev][0]}
     let dep0=null,ride=0;
     seq.forEach(n=>{if(N[n].dl!=null){const x=N[n].dl-off[n];dep0=dep0==null?x:Math.min(dep0,x)}if(N[n].k=='drop')ride+=off[n]-off[n-1]});
     const depU=Math.max(dep0==null?nowS:dep0,nowS); // não dá para sair no passado
     let late=0;seq.forEach(n=>{if(N[n].dl!=null)late+=Math.max(0,depU+off[n]-N[n].dl)});
-    return{off,end:t,dep0,depU,ride,late}};
-  const cost=(r,W)=>r.end+0.1*r.ride+W*r.late;
+    return{off,end:t,dep0,depU,ride,late,km}};
+  const cost=(r,W)=>r.end+0.1*r.ride+W*r.late+PESO_KM*r.km/1000;
   const ev=(s,W)=>cost(sim(s),W);
   const rnd=k=>Math.floor(Math.random()*k);
   // busca local: 2-opt (inverte trechos, elimina "vai e volta"), mover uma parada e mover um paciente inteiro
@@ -289,25 +325,30 @@ async function plan(){
     best=otimiza(10,starts);R=sim(best);
     if(R.late>0){modoLate=true;best=otimiza(mesmoHosp?0:1,[best,...starts]);R=sim(best)}
   }
-  const dep=R.depU;
+  let dep=R.depU;
   // paradas
-  const stops=best.map(n=>{const nd=N[n],p=S.pts[nd.i],arr=dep+R.off[n];
-    let st='',cls='';
-    if(nd.dl!=null){const marg=(mins(p.hora)*60-arr)/60;st=marg<0?`consulta ${p.hora} · atraso ${Math.round(-marg)} min`:`consulta ${p.hora} · folga ${Math.round(marg)} min`;cls=marg>=10?'ok':marg>=0?'risk':'bad'}
-    return{nd,p,arr,st,cls,pt:nd.pt}});
+  const stat=s=>{let st='',cls='';
+    if(s.nd.dl!=null){const marg=(mins(s.p.hora)*60-s.arr)/60;st=marg<0?`consulta ${s.p.hora} · atraso ${Math.round(-marg)} min`:`consulta ${s.p.hora} · folga ${Math.round(marg)} min`;cls=marg>=10?'ok':marg>=0?'risk':'bad'}
+    s.st=st;s.cls=cls};
+  const stops=best.map(n=>{const nd=N[n];return{nd,p:S.pts[nd.i],off:R.off[n],pt:nd.pt}});
   // pontos do trajeto (sem repetir paradas consecutivas no mesmo local)
-  const path=[S.base];stops.forEach(s=>{if(k5(path[path.length-1])!=k5(s.pt))path.push(s.pt)});
+  const path=[S.base];stops.forEach(s=>{if(k5(path[path.length-1])!=k5(s.pt))path.push(s.pt);s.pi=path.length-1});
   if(volta&&k5(path[path.length-1])!=k5(S.base))path.push(S.base); // retorno à base
-  let poly=path.map(p=>[p.lat,p.lon]);
-  if(path.length>1){try{poly=await rotaOSRM(path)}catch(e){console.error(e)}} // se falhar, linhas retas
+  let RL={poly:path.map(p=>[p.lat,p.lon]),cum:path.map(()=>0)};
+  if(path.length>1){try{RL=await rotaLegs(path)}catch(e){console.error(e)}} // se falhar, linhas retas
+  // trechos alternativos mais lentos atrasam as paradas seguintes: recalcula a saída para ainda chegar no horário
+  const dd=stops.filter(s=>s.nd.dl!=null).map(s=>s.nd.dl-(s.off+RL.cum[s.pi]));
+  if(dd.length)dep=Math.max(Math.min(...dd),nowS);
+  stops.forEach(s=>{s.arr=dep+s.off+RL.cum[s.pi];stat(s)});
+  const poly=RL.poly,fim=dep+R.end+RL.cum[path.length-1];
   const coords=[S.base,...stops.map(s=>s.pt)];
   drawMap(coords,poly);
   // saída
-  let h=`<div class="card"><b>Saia da base às ${hm(dep)}</b><br><small>Duração estimada: ${Math.round(R.end/60)} min${volta?' (até voltar à base, ~'+hm(dep+R.end)+')':''}, com +15% de margem de trânsito e ${SV/60} min por parada</small>`;
+  let h=`<div class="card"><b>Saia da base às ${hm(dep)}</b><br><small>Duração estimada: ${Math.round((fim-dep)/60)} min${volta?' (até voltar à base, ~'+hm(fim)+')':''}, com +15% de margem de trânsito e ${SV/60} min por parada</small>`;
   if(outroDia)h+=`<br><small>Todas as consultas de hoje já passaram: calculado como rota de outro dia.</small>`;
   if(modoLate)h+=`<div class="bad">⚠ Não dá para chegar no horário de todos saindo agora. Todos serão buscados e entregues; a rota foi montada pelo menor tempo total, sem forçar paradas só para correr atrás do horário.</div>`;
   h+=stops.map((s,k)=>`<div class="st"><span class="n ${s.nd.k=='drop'?'d':''}">${k+1}</span><div><b>${s.nd.k=='pick'?'Buscar':'Deixar'} ${s.p.nome}</b> <small>${hm(s.arr)}</small><br><small>${short(s.pt.label)}</small>${s.st?`<br><span class="${s.cls}">${s.st}</span>`:''}</div></div>`).join('');
-  if(volta)h+=`<div class="st"><span class="n" style="background:#222">B</span><div><b>Voltar à base</b> <small>${hm(dep+R.end)}</small></div></div>`;
+  if(volta)h+=`<div class="st"><span class="n" style="background:#222">B</span><div><b>Voltar à base</b> <small>${hm(fim)}</small></div></div>`;
   // links Google Maps: paradas pelo endereço em texto, dividido a cada 10 paradas
   const f=p=>(p.nav||p.label.replace(/ — /,', '))+', Brasil';
   const nav=path.slice(1);
