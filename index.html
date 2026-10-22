@@ -33,7 +33,7 @@ footer{text-align:center;margin:8px 0 16px;font-size:12px}footer a{color:var(--m
 <label>Tipo</label><select id="tipo"><option value="ida">Ida: casa → hospital</option><option value="volta">Retorno: hospital → casa</option></select>
 <label>Endereço do paciente</label><input id="home" placeholder="Rua, número, bairro…" autocomplete="off"><small id="hh" class="risk" style="display:block"></small>
 <label>Hospital / clínica</label><input id="hosp" placeholder="Ex.: hospital Angelina Caron" autocomplete="off">
-<div class="row" id="tm"><div><label>Horário da consulta</label><input id="hora" type="time"></div><div><label>Chegar antes (min)</label><select id="adv"><option>15</option><option selected>30</option><option>45</option><option>60</option></select></div></div>
+<div class="row" id="tm"><div><label>Horário da consulta (estimado)</label><input id="hora" type="time"></div></div>
 <button id="add">+ Adicionar à lista</button>
 </div>
 
@@ -49,7 +49,7 @@ footer{text-align:center;margin:8px 0 16px;font-size:12px}footer a{color:var(--m
 <script>
 /* ================= CONFIGURAÇÃO ================= */
 // Chave gratuita da Geoapify (geoapify.com → MyProjects), sem cartão de crédito. Só é usada na busca de endereços.
-const GEO_KEY='d38fddfebc2044c6806d84bcfced29e0';
+const GEO_KEY='COLE_SUA_CHAVE_GEOAPIFY';
 // Retângulo do estado do Paraná (oeste, sul, leste, norte)
 const PR={w:-54.62,s:-26.72,e:-48.02,n:-22.5};
 const BASE_TXT="Rua Frei Nicodemus Grundhoff, 317, Jardim Esmeralda, Piraquara, PR",SV=180,FATOR=1.15;
@@ -142,7 +142,7 @@ $('#add').onclick=()=>{
   if(!nome)return alert('Informe o nome');
   if(!cur.home||!cur.hosp)return alert('Escolha o endereço e o hospital nas sugestões que aparecem ao digitar');
   if(tipo=='ida'&&!hora)return alert('Informe o horário da consulta');
-  S.pts.push({nome,tipo,hora:tipo=='ida'?hora:'',adv:+$('#adv').value,home:cur.home,hosp:cur.hosp});
+  S.pts.push({nome,tipo,hora:tipo=='ida'?hora:'',home:cur.home,hosp:cur.hosp});
   [cur.home,cur.hosp].forEach(p=>{if(!S.recent.some(r=>r.label==p.label))S.recent.unshift(p)});S.recent=S.recent.slice(0,40);
   save();render();['nome','home','hosp'].forEach(k=>$('#'+k).value='');cur.home=cur.hosp=null;$('#hh').textContent='';
 };
@@ -189,7 +189,7 @@ async function plan(){
   S.pts.forEach((p,i)=>{
     const ida=p.tipo=='ida';
     N.push({i,k:'pick',pt:ida?p.home:p.hosp});
-    N.push({i,k:'drop',pt:ida?p.hosp:p.home,dl:ida?(mins(p.hora)-p.adv)*60:null});
+    N.push({i,k:'drop',pt:ida?p.hosp:p.home,dl:ida?mins(p.hora)*60:null});
   });
   const P=[S.base,...N.map(n=>n.pt)];
   const U=[],ui={};
@@ -203,71 +203,103 @@ async function plan(){
   const cs=S.pts.filter(p=>p.tipo=='ida').map(p=>mins(p.hora)*60);
   const outroDia=cs.length>0&&cs.every(c=>c<nowS);
   if(outroDia)nowS=0;
+  // rota com retorno de hospital termina voltando à base
+  const volta=S.pts.some(p=>p.tipo=='volta');
+  // mesmo hospital para todos (e todos do mesmo tipo): busca todos e entrega todos, numa viagem só
+  const km=(a,b)=>Math.hypot((a.lon-b.lon)*100,(a.lat-b.lat)*111);
+  const mesmoHosp=S.pts.every(p=>km(p.hosp,S.pts[0].hosp)<0.25);
+  const lote=mesmoHosp&&S.pts.every(p=>p.tipo==S.pts[0].tipo)&&np>1;
   const valid=seq=>{const pos={};seq.forEach((n,k)=>pos[n]=k);
-    for(const n of seq){if(N[n].k=='drop'){if(pos[n-1]>pos[n])return false}}
+    for(const n of seq){if(N[n].k=='drop'&&pos[n-1]>pos[n])return false}
+    if(lote){let viuDrop=false;for(const n of seq){if(N[n].k=='drop')viuDrop=true;else if(viuDrop)return false}}
     return true};
-  // simulação: paradas no mesmo local seguidas contam um único tempo de parada
+  // simulação: paradas seguidas no mesmo local contam um único tempo de parada; se volta, inclui o retorno à base
   const sim=seq=>{let t=0,prev=0;const off=[];
     for(const n of seq){const idx=n+1;if(prev>0&&pi[prev]!=pi[idx])t+=SV;t+=D[prev][idx];off[n]=t;prev=idx}
-    t+=SV;
+    t+=SV;if(volta)t+=D[prev][0];
     let dep0=null,ride=0;
     seq.forEach(n=>{if(N[n].dl!=null){const x=N[n].dl-off[n];dep0=dep0==null?x:Math.min(dep0,x)}if(N[n].k=='drop')ride+=off[n]-off[n-1]});
     const depU=Math.max(dep0==null?nowS:dep0,nowS); // não dá para sair no passado
     let late=0;seq.forEach(n=>{if(N[n].dl!=null)late+=Math.max(0,depU+off[n]-N[n].dl)});
     return{off,end:t,dep0,depU,ride,late}};
-  const cost=(r,W)=>r.end+0.25*r.ride+W*r.late;
+  const cost=(r,W)=>r.end+0.1*r.ride+W*r.late;
+  const ev=(s,W)=>cost(sim(s),W);
   const rnd=k=>Math.floor(Math.random()*k);
-  const mv=cur=>{
-    const s=[...cur],r=Math.random();
-    if(r<.45){const x=s.splice(rnd(m),1)[0];s.splice(rnd(m),0,x)}            // move uma parada
-    else if(r<.8){const i=rnd(np);s.splice(s.indexOf(2*i),1);s.splice(s.indexOf(2*i+1),1); // move o paciente inteiro
-      const a=rnd(m-1);s.splice(a,0,2*i);const b=a+1+rnd(m-1-a);s.splice(b,0,2*i+1)}
-    else{const i=rnd(m),j=rnd(m);[s[i],s[j]]=[s[j],s[i]]}                    // troca duas paradas
-    return s};
-  function otimiza(W,starts){
-    let bestS=null,bestC=Infinity;
-    for(const st of starts){
-      if(!valid(st))continue;
-      let cu=[...st],cc=cost(sim(cu),W);
-      if(cc<bestC){bestC=cc;bestS=[...cu]}
-      const T0=Math.max(60,cc*0.03),IT=6000;
-      for(let it=0;it<IT;it++){
-        const T=T0*(1-it/IT)+1e-9,s=mv(cu);
-        if(!valid(s))continue;
-        const c=cost(sim(s),W);
-        if(c<=cc||Math.random()<Math.exp((cc-c)/T)){cu=s;cc=c;if(c<bestC){bestC=c;bestS=[...s]}}
+  // busca local: 2-opt (inverte trechos, elimina "vai e volta"), mover uma parada e mover um paciente inteiro
+  function descent(s,W){
+    let c=ev(s,W),melhorou=true;
+    while(melhorou){melhorou=false;
+      for(let i=0;i<m-1;i++)for(let j=i+1;j<m;j++){ // 2-opt
+        const t=[...s.slice(0,i),...s.slice(i,j+1).reverse(),...s.slice(j+1)];
+        if(!valid(t))continue;const ct=ev(t,W);if(ct<c-1e-6){s=t;c=ct;melhorou=true}
+      }
+      for(let i=0;i<m;i++)for(let j=0;j<m;j++){ // mover uma parada
+        if(i==j)continue;const t=[...s],x=t.splice(i,1)[0];t.splice(j,0,x);
+        if(!valid(t))continue;const ct=ev(t,W);if(ct<c-1e-6){s=t;c=ct;melhorou=true}
+      }
+      for(let p=0;p<np;p++){ // mover busca+entrega de um paciente
+        const base0=s.filter(n=>n!=2*p&&n!=2*p+1);
+        for(let a=0;a<=m-2;a++)for(let b=a+1;b<=m-1;b++){
+          const t=[...base0];t.splice(a,0,2*p);t.splice(b,0,2*p+1);
+          if(!valid(t))continue;const ct=ev(t,W);if(ct<c-1e-6){s=t;c=ct;melhorou=true}
+        }
       }
     }
-    return bestS;
+    return s;
   }
-  // pontos de partida: (A) buscar e deixar um por um, por horário; (B) buscar todos (vizinho mais próximo) e levar todos
+  function perturba(s,k){
+    let out=[...s];
+    for(let q=0,ok=0;q<60&&ok<k;q++){
+      const t=[...out];
+      if(Math.random()<.5){const x=t.splice(rnd(m),1)[0];t.splice(rnd(m),0,x)}
+      else{const i=rnd(m),j=rnd(m);[t[i],t[j]]=[t[j],t[i]]}
+      if(valid(t)){out=t;ok++}
+    }
+    return out;
+  }
+  function otimiza(W,starts){
+    let best=null,bc=Infinity;
+    for(const st of starts){if(!valid(st))continue;const r=descent([...st],W),c=ev(r,W);if(c<bc){bc=c;best=r}}
+    const R_=np<=12?25:10; // reinícios com pequenas perturbações
+    for(let k=0;k<R_;k++){const r=descent(perturba(best,3),W),c=ev(r,W);if(c<bc-1e-6){bc=c;best=r}}
+    return best;
+  }
+  // pontos de partida (vizinho mais próximo)
   const nn=(ids,from)=>{const out=[],rest=[...ids];let prev=from;
     while(rest.length){let bi=0,bd=Infinity;rest.forEach((n,k)=>{const d=D[prev][n+1];if(d<bd){bd=d;bi=k}});const n=rest.splice(bi,1)[0];out.push(n);prev=n+1}
     return out};
+  const idsP=[...Array(np).keys()].map(i=>2*i),idsD=idsP.map(n=>n+1);
+  const pk=nn(idsP,0);
   const order=[...Array(np).keys()].sort((a,b)=>(N[2*a+1].dl??1e9)-(N[2*b+1].dl??1e9));
-  const A=order.flatMap(i=>[2*i,2*i+1]);
-  const pk=nn([...Array(np).keys()].map(i=>2*i),0);
-  const B=[...pk,...nn([...Array(np).keys()].map(i=>2*i+1),pk[pk.length-1]+1)];
-  // 1ª tentativa: cumprir todos os horários. Se for impossível, monta pelo menor tempo total, sem correr atrás do horário.
-  let best=otimiza(10,[A,B]),R=sim(best),modoLate=false;
-  if(R.late>0){modoLate=true;best=otimiza(0,[best,A,B]);R=sim(best)}
+  const starts=[
+    [...pk,...nn(idsD,pk[pk.length-1]+1)],            // buscar todos (mais próximo) e entregar (mais próximo)
+    [...pk,...nn(idsD,0).reverse()],                   // entregas terminando perto da base
+    [...pk,...[...idsD].sort((a,b)=>D[0][b+1]-D[0][a+1])], // entregar do mais longe da base ao mais perto
+    order.flatMap(i=>[2*i,2*i+1])                      // um por vez, por horário (só vale se hospitais diferentes)
+  ];
+  // 1ª tentativa: cumprir os horários. Se for impossível, todos continuam sendo buscados e a rota sai pelo menor tempo total
+  // (com hospitais diferentes, ainda dá um peso leve às consultas mais cedo).
+  let best=otimiza(10,starts),R=sim(best),modoLate=false;
+  if(R.late>0){modoLate=true;best=otimiza(mesmoHosp?0:1,[best,...starts]);R=sim(best)}
   const dep=R.depU;
   // paradas
   const stops=best.map(n=>{const nd=N[n],p=S.pts[nd.i],arr=dep+R.off[n];
     let st='',cls='';
-    if(nd.dl!=null){const marg=(mins(p.hora)*60-arr)/60;st=marg<0?`consulta ${p.hora} · atraso ${Math.round(-marg)} min`:`consulta ${p.hora} · folga ${Math.round(marg)} min`;cls=marg>=p.adv-1?'ok':marg>=0?'risk':'bad'}
+    if(nd.dl!=null){const marg=(mins(p.hora)*60-arr)/60;st=marg<0?`consulta ${p.hora} · atraso ${Math.round(-marg)} min`:`consulta ${p.hora} · folga ${Math.round(marg)} min`;cls=marg>=10?'ok':marg>=0?'risk':'bad'}
     return{nd,p,arr,st,cls,pt:nd.pt}});
   // pontos do trajeto (sem repetir paradas consecutivas no mesmo local)
   const path=[S.base];stops.forEach(s=>{if(k5(path[path.length-1])!=k5(s.pt))path.push(s.pt)});
+  if(volta&&k5(path[path.length-1])!=k5(S.base))path.push(S.base); // retorno à base
   let poly=path.map(p=>[p.lat,p.lon]);
   if(path.length>1){try{poly=await rotaOSRM(path)}catch(e){console.error(e)}} // se falhar, linhas retas
   const coords=[S.base,...stops.map(s=>s.pt)];
   drawMap(coords,poly);
   // saída
-  let h=`<div class="card"><b>Saia da base às ${hm(dep)}</b><br><small>Duração estimada: ${Math.round(R.end/60)} min (com +15% de margem de trânsito e ${SV/60} min por parada)</small>`;
+  let h=`<div class="card"><b>Saia da base às ${hm(dep)}</b><br><small>Duração estimada: ${Math.round(R.end/60)} min${volta?' (até voltar à base, ~'+hm(dep+R.end)+')':''}, com +15% de margem de trânsito e ${SV/60} min por parada</small>`;
   if(outroDia)h+=`<br><small>Todas as consultas de hoje já passaram: calculado como rota de outro dia.</small>`;
-  if(modoLate)h+=`<div class="bad">⚠ Não dá para chegar no horário de todos saindo agora. A rota foi montada pelo menor tempo total, sem forçar paradas só para correr atrás do horário.</div>`;
+  if(modoLate)h+=`<div class="bad">⚠ Não dá para chegar no horário de todos saindo agora. Todos serão buscados e entregues; a rota foi montada pelo menor tempo total, sem forçar paradas só para correr atrás do horário.</div>`;
   h+=stops.map((s,k)=>`<div class="st"><span class="n ${s.nd.k=='drop'?'d':''}">${k+1}</span><div><b>${s.nd.k=='pick'?'Buscar':'Deixar'} ${s.p.nome}</b> <small>${hm(s.arr)}</small><br><small>${short(s.pt.label)}</small>${s.st?`<br><span class="${s.cls}">${s.st}</span>`:''}</div></div>`).join('');
+  if(volta)h+=`<div class="st"><span class="n" style="background:#222">B</span><div><b>Voltar à base</b> <small>${hm(dep+R.end)}</small></div></div>`;
   // links Google Maps: paradas pelo endereço em texto, dividido a cada 10 paradas
   const f=p=>(p.nav||p.label.replace(/ — /,', '))+', Brasil';
   const nav=path.slice(1);
